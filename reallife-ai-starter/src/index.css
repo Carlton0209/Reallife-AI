@@ -1,0 +1,78 @@
+/* RealLife AI — base styles */
+/* NOTE: for production, move the Google Fonts link into index.html <head> for faster paint */
+@import url('https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500&family=JetBrains+Mono:wght@400;500&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #root {
+  margin: 0;
+  padding: 0;
+  min-height: 100vh;
+}
+
+body {
+  font-family: 'Inter Tight', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
+  background: #ECE8DC;
+  color: #0A0A0A;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Swiss-style range slider — thin track, solid ink thumb, no rounding on track */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 2px;
+  background: #E8E4DB;
+  cursor: pointer;
+  outline: none;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  background: #0A0A0A;
+  border-radius: 50%;
+  border: none;
+  cursor: pointer;
+}
+
+input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  background: #0A0A0A;
+  border-radius: 50%;
+  border: none;
+  cursor: pointer;
+}
+
+/* Remove focus ring on buttons — we use border contrast instead */
+button:focus {
+  outline: none;
+}
+button:focus-visible {
+  outline: 1px solid #0A0A0A;
+  outline-offset: 2px;
+}
+
+/* ---------- Homepage marquee (used by Home.jsx TrustedBy) ---------- */
+/* The MarqueeRow component duplicates its items, then translates the track
+   -50% (i.e. one full set of items). Because the second set starts exactly
+   where the first set ends, the loop is seamless. Inline animationDuration /
+   animationDirection on the element override the class shorthand below. */
+.rl-marquee {
+  animation: rl-marquee 28s linear infinite;
+}
+@keyframes rl-marquee {
+  from { transform: translateX(0); }
+  to   { transform: translateX(-50%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rl-marquee {
+    animation: none !important;
+  }
+}
