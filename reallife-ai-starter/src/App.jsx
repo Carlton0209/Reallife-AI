@@ -1,10 +1,36 @@
 import { useState, useRef, useEffect } from 'react'
 import CompareSlider from './CompareSlider'
+import { runEnhance } from './lib/comfyui'
+import workflowTemplate from './workflows/portrait-enhance.json'
 
 // ============================================================
 // RealLife AI — Swiss Minimalist UI
 // Flow: upload → enhance → compare → export
 // ============================================================
+
+// Wiring between the Swiss 4-step UI and the ComfyUI workflow.
+// These keys MUST match the node IDs in src/workflows/portrait-enhance.json.
+//   input  = LoadImage node (receives the uploaded filename)
+//   output = SaveImage node (final 2× upscaled result)
+//   prompt = CR Prompt Text node (lets style presets change the prompt)
+//   seed1 = primary KSampler (Flux 2 Klein stage)
+//   seed2 = advanced KSampler (z-Image Turbo stage)
+const NODE_IDS = {
+  input:  '28',
+  output: '94',
+  prompt: '61',
+  seed1:  '53',
+  seed2:  '95',
+}
+
+// Style presets — each overrides the prompt text injected into node 61.
+// Keep these short and photo-oriented; the LoRA does the heavy lifting.
+const PRESET_PROMPTS = {
+  natural:     '2k, 4K, natural daylight, true-to-life skin tones, photographic texture',
+  cinematic:   '2k, 4K, cinematic grade, teal-orange, film stock highlights, shallow depth of field',
+  studio:      '2k, 4K, high-key studio lighting, commercial portrait, clean background, sharp detail',
+  documentary: '2k, 4K, documentary style, natural candid light, honest skin texture, editorial',
+}
 
 const STEPS = [
   { id: 1, label: 'UPLOAD' },
@@ -37,7 +63,7 @@ function Header({ currentStep }) {
         ))}
       </div>
       <div className="justify-self-end flex items-center gap-2.5 font-mono text-[10px] tracking-[0.12em] text-secondary">
-        <span></span>
+        <span>JC</span>
         <div className="w-[22px] h-[22px] border border-hairline rounded-full" />
       </div>
     </div>
@@ -117,40 +143,102 @@ function UploadView({ onFileSelected }) {
 }
 
 // ------------------------------------------------------------
-// 02 — Enhance (processing state)
-// Currently simulates progress locally. Replace the useEffect below
-// with your actual ComfyUI API call — see README for the pattern.
+// 02 — Enhance (real ComfyUI API call)
 // ------------------------------------------------------------
-function EnhanceView({ imageUrl, onComplete, onCancel }) {
+function EnhanceView({ imageData, preset, onComplete, onCancel }) {
   const [progress, setProgress] = useState(0)
   const [elapsed, setElapsed] = useState(0)
+  const [stage, setStage] = useState('Starting')
+  const [errorMsg, setErrorMsg] = useState(null)
 
   useEffect(() => {
-    const start = Date.now()
-    const timer = setInterval(() => {
-      setElapsed((Date.now() - start) / 1000)
-      setProgress(p => {
-        const next = Math.min(100, p + 2)
-        if (next >= 100) {
-          clearInterval(timer)
-          setTimeout(onComplete, 400)
-        }
-        return next
-      })
-    }, 120)
-    return () => clearInterval(timer)
-  }, [onComplete])
+    if (!imageData?.file) {
+      setErrorMsg('No file to enhance')
+      return
+    }
 
-  const estimatedTotal = 6
-  const remaining = Math.max(0, estimatedTotal - elapsed)
-  const pass = Math.min(4, Math.max(1, Math.ceil(progress / 25)))
+    const controller = new AbortController()
+    const start = Date.now()
+    const tick = setInterval(() => setElapsed((Date.now() - start) / 1000), 100)
+
+    // Deep clone so we can safely mutate per-run (seed, prompt, input filename)
+    const workflow = JSON.parse(JSON.stringify(workflowTemplate))
+
+    // 1. Swap in the preset's prompt (node 61)
+    if (workflow[NODE_IDS.prompt]) {
+      workflow[NODE_IDS.prompt].inputs.prompt =
+        PRESET_PROMPTS[preset] || PRESET_PROMPTS.natural
+    }
+
+    // 2. Randomize seeds so repeat runs look a bit different
+    //    Use Math.random * 1e15 — within JS safe-int range and matches ComfyUI's seed format
+    if (workflow[NODE_IDS.seed1]) {
+      workflow[NODE_IDS.seed1].inputs.seed = Math.floor(Math.random() * 1e15)
+    }
+    if (workflow[NODE_IDS.seed2]) {
+      workflow[NODE_IDS.seed2].inputs.noise_seed = Math.floor(Math.random() * 1e15)
+    }
+
+    runEnhance({
+      file: imageData.file,
+      workflowTemplate: workflow,
+      inputNodeId: NODE_IDS.input,
+      outputNodeId: NODE_IDS.output,
+      onStage: setStage,
+      onProgress: ({ value, max }) => {
+        if (max > 0) setProgress((value / max) * 100)
+      },
+      signal: controller.signal,
+    })
+      .then(({ enhancedUrl }) => {
+        clearInterval(tick)
+        setProgress(100)
+        setTimeout(() => onComplete(enhancedUrl), 300)
+      })
+      .catch((err) => {
+        clearInterval(tick)
+        if (err.message === 'Aborted') return  // user hit cancel — don't show error
+        console.error('Enhance failed:', err)
+        setErrorMsg(err.message)
+      })
+
+    return () => {
+      controller.abort()
+      clearInterval(tick)
+    }
+  }, [imageData, preset, onComplete])
+
+  // Error state
+  if (errorMsg) {
+    return (
+      <div className="bg-white">
+        <div className="p-5">
+          <div className="border border-accent text-ink p-4 font-mono text-[11px] tracking-[0.06em] leading-6">
+            <div className="text-accent mb-2">ENHANCEMENT FAILED</div>
+            <div className="text-secondary">{errorMsg}</div>
+            <div className="text-secondary mt-3 text-[10px]">
+              Check: ComfyUI running at {import.meta.env.VITE_COMFY_URL || 'http://127.0.0.1:8188'} · CORS enabled · node IDs correct
+            </div>
+          </div>
+        </div>
+        <div className="border-t border-hairline px-5 py-4 flex justify-between items-center">
+          <button
+            onClick={onCancel}
+            className="bg-transparent font-mono text-[10px] tracking-[0.14em] text-secondary hover:text-ink transition-colors"
+          >
+            ×&nbsp;&nbsp;CANCEL
+          </button>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="bg-white">
       <div className="p-5">
         <div className="relative aspect-video bg-ink overflow-hidden">
-          {imageUrl && (
-            <img src={imageUrl} alt="" className="w-full h-full object-cover opacity-55" />
+          {imageData?.url && (
+            <img src={imageData.url} alt="" className="w-full h-full object-cover opacity-55" />
           )}
           <div className="absolute top-3.5 right-4 flex items-center gap-2 text-white font-mono">
             <span className="w-1.5 h-1.5 bg-accent rounded-full animate-pulse" />
@@ -171,10 +259,10 @@ function EnhanceView({ imageUrl, onComplete, onCancel }) {
         </div>
       </div>
       <div className="border-t border-hairline px-5 py-3.5 font-mono text-[10px] leading-7 text-secondary">
-        <div>› loading LoRA: photorealism_v2.safetensors</div>
-        <div>› identity landmarks detected (68 points)</div>
-        <div>› applying cinematic lighting model</div>
-        <div className="text-ink">› rendering pass {pass} of 4...</div>
+        <div>› preset: {preset}</div>
+        <div>› flux 2 klein 4B + anything2real LoRA</div>
+        <div>› z-image turbo refinement pass</div>
+        <div className="text-ink">› {stage}...</div>
       </div>
       <div className="border-t border-hairline px-5 py-4 flex justify-between items-center">
         <button
@@ -185,8 +273,6 @@ function EnhanceView({ imageUrl, onComplete, onCancel }) {
         </button>
         <div className="font-mono text-[10px] tracking-[0.14em] text-secondary">
           ELAPSED&nbsp;<span className="text-ink">{elapsed.toFixed(1)}s</span>
-          &nbsp;&nbsp;·&nbsp;&nbsp;EST.&nbsp;REMAINING&nbsp;
-          <span className="text-ink">{remaining.toFixed(1)}s</span>
         </div>
       </div>
     </div>
@@ -194,26 +280,22 @@ function EnhanceView({ imageUrl, onComplete, onCancel }) {
 }
 
 // ------------------------------------------------------------
-// CompareSlider is now imported from './CompareSlider' — the
-// same component is used by Home.jsx so the behavior stays in
-// lockstep. Swiss styling (square corners, small handle) is
-// achieved via the `rounded="0"` and `size="xs"` props below.
+// CompareSlider is imported from './CompareSlider' — shared with Home.jsx.
+// Swiss styling (square corners, small handle) via `rounded="0"` and `size="xs"`.
 // ------------------------------------------------------------
 
 // ------------------------------------------------------------
 // 03 — Compare
 // ------------------------------------------------------------
-function CompareView({ imageData, onExport, onBack }) {
+function CompareView({ imageData, preset, onPresetChange, onExport, onBack, onRerun }) {
   const [intensity, setIntensity] = useState(72)
   const [identityLock, setIdentityLock] = useState(true)
-  const [preset, setPreset] = useState('cinematic')
-  const presets = ['natural', 'cinematic', 'studio', 'documentary']
+  const presets = Object.keys(PRESET_PROMPTS)
 
-  // In production: imageData.url = original, imageData.enhancedUrl = API result
   const beforeUrl = imageData?.url
   const afterUrl = imageData?.enhancedUrl || imageData?.url
 
-  const fileName = imageData?.name?.toUpperCase() || 'PORTRAIT_004.JPG'
+  const fileName = imageData?.name?.toUpperCase() || 'PORTRAIT.JPG'
 
   return (
     <div className="bg-white">
@@ -230,8 +312,8 @@ function CompareView({ imageData, onExport, onBack }) {
           size="xs"
         />
         <div className="flex justify-between mt-2.5 font-mono text-[10px] tracking-[0.1em] text-secondary">
-          <span>{fileName}&nbsp;&nbsp;·&nbsp;&nbsp;3024&nbsp;×&nbsp;4032&nbsp;&nbsp;·&nbsp;&nbsp;4.2&nbsp;MB</span>
-          <span>PROC&nbsp;2.41S&nbsp;&nbsp;·&nbsp;&nbsp;IDENTITY&nbsp;Δ&nbsp;0.003</span>
+          <span>{fileName}</span>
+          <span>PRESET&nbsp;{preset.toUpperCase()}&nbsp;&nbsp;·&nbsp;&nbsp;IDENTITY&nbsp;LOCKED</span>
         </div>
       </div>
       <div className="border-t border-hairline px-5 py-4 grid grid-cols-2 gap-8">
@@ -261,12 +343,21 @@ function CompareView({ imageData, onExport, onBack }) {
         </div>
       </div>
       <div className="border-t border-hairline px-5 py-4">
-        <Mono className="text-[10px] text-secondary tracking-[0.14em] block mb-3">STYLE PRESET</Mono>
+        <div className="flex justify-between items-center mb-3">
+          <Mono className="text-[10px] text-secondary tracking-[0.14em]">STYLE PRESET</Mono>
+          <button
+            onClick={onRerun}
+            className="font-mono text-[10px] tracking-[0.14em] text-secondary hover:text-ink transition-colors"
+            title="Rerun the workflow with the selected preset"
+          >
+            ↻&nbsp;&nbsp;RERUN
+          </button>
+        </div>
         <div className="flex gap-2 flex-wrap">
           {presets.map(p => (
             <button
               key={p}
-              onClick={() => setPreset(p)}
+              onClick={() => onPresetChange(p)}
               className={`px-3.5 py-1.5 border font-mono text-[10px] tracking-[0.14em] transition-colors ${
                 preset === p
                   ? 'bg-ink text-white border-ink'
@@ -300,14 +391,16 @@ function CompareView({ imageData, onExport, onBack }) {
 // 04 — Export
 // ------------------------------------------------------------
 function ExportView({ imageData, onBack }) {
-  const [resolution, setResolution] = useState(2)
+  const [resolution, setResolution] = useState(1)
   const [format, setFormat] = useState('JPG')
   const [colorProfile, setColorProfile] = useState('sRGB')
 
+  // ComfyUI already outputs 2× upscaled, so 1× here = native output (~3840 long edge).
+  // Further multipliers are client-side naive upscale via canvas.
   const sizeMap = {
-    1: { dim: '3024 × 4032', size: '4.6 MB' },
-    2: { dim: '6048 × 8064', size: '18.4 MB' },
-    4: { dim: '12096 × 16128', size: '73.6 MB' },
+    1: { dim: 'native',    size: '~12 MB' },
+    2: { dim: '2× canvas', size: '~40 MB' },
+    4: { dim: '4× canvas', size: '~160 MB' },
   }
   const current = sizeMap[resolution]
 
@@ -327,18 +420,15 @@ function ExportView({ imageData, onBack }) {
   const handleDownload = async () => {
     const sourceUrl = imageData?.enhancedUrl || imageData?.url
     if (!sourceUrl) {
-      console.warn('No image to download — imageData is empty')
+      console.warn('No image to download')
       return
     }
 
-    // Browser can't natively encode TIFF — fall back to PNG for TIFF selection.
-    // Swap this out when you wire up a real backend (ComfyUI export endpoint).
     const ext = format.toLowerCase() === 'tiff' ? 'png' : format.toLowerCase()
     const base = imageData?.name?.replace(/\.[^/.]+$/, '') || 'portrait'
     const filename = `${base}_reallife_${resolution}x.${ext}`
 
     try {
-      // Load the source image into an Image element
       const img = new Image()
       img.crossOrigin = 'anonymous'
       await new Promise((resolve, reject) => {
@@ -347,8 +437,6 @@ function ExportView({ imageData, onBack }) {
         img.src = sourceUrl
       })
 
-      // Draw to canvas at the chosen resolution multiplier.
-      // This is a naive upscale — real ComfyUI would do much better.
       const canvas = document.createElement('canvas')
       canvas.width = img.naturalWidth * resolution
       canvas.height = img.naturalHeight * resolution
@@ -357,7 +445,6 @@ function ExportView({ imageData, onBack }) {
       ctx.imageSmoothingQuality = 'high'
       ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
 
-      // Encode to the user's chosen format and trigger download
       const mimeType = ext === 'png' ? 'image/png' : 'image/jpeg'
       const quality = ext === 'jpg' ? 0.92 : undefined
 
@@ -444,7 +531,7 @@ function ExportView({ imageData, onBack }) {
           onClick={handleDownload}
           className="px-6 py-2.5 bg-ink text-white font-mono text-[10px] tracking-[0.18em] hover:opacity-85 transition-opacity"
         >
-          DOWNLOAD&nbsp;{current.size}&nbsp;&nbsp;→
+          DOWNLOAD&nbsp;&nbsp;→
         </button>
       </div>
     </div>
@@ -457,6 +544,7 @@ function ExportView({ imageData, onBack }) {
 export default function App() {
   const [step, setStep] = useState(1)
   const [imageData, setImageData] = useState(null)
+  const [preset, setPreset] = useState('natural')
 
   const reset = () => {
     if (imageData?.url) URL.revokeObjectURL(imageData.url)
@@ -474,16 +562,27 @@ export default function App() {
           )}
           {step === 2 && (
             <EnhanceView
-              imageUrl={imageData?.url}
-              onComplete={() => setStep(3)}
+              imageData={imageData}
+              preset={preset}
+              onComplete={(enhancedUrl) => {
+                setImageData(prev => ({ ...prev, enhancedUrl }))
+                setStep(3)
+              }}
               onCancel={reset}
             />
           )}
           {step === 3 && (
             <CompareView
               imageData={imageData}
+              preset={preset}
+              onPresetChange={setPreset}
               onExport={() => setStep(4)}
-              onBack={() => setStep(1)}
+              onBack={reset}
+              onRerun={() => {
+                // Drop the previous enhancedUrl and go back to Enhance step with current preset
+                setImageData(prev => ({ ...prev, enhancedUrl: undefined }))
+                setStep(2)
+              }}
             />
           )}
           {step === 4 && (
