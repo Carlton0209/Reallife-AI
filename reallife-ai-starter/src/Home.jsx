@@ -178,8 +178,12 @@ function Nav() {
 // ----------------------------------------------------------------
 // §01 — Hero
 // ----------------------------------------------------------------
-const HeroBefore = () => <PortraitSilhouette palette={PORTRAIT.heroBefore} landscape />
-const HeroAfter = () => <PortraitSilhouette palette={PORTRAIT.heroAfter} landscape />
+const HeroBefore = () => (
+  <img src="/demos/hero-before.webp" alt="" className="w-full h-full object-cover" loading="eager" />
+)
+const HeroAfter = () => (
+  <img src="/demos/hero-after.webp" alt="" className="w-full h-full object-cover" loading="eager" />
+)
 
 function Hero() {
   return (
@@ -325,17 +329,29 @@ function FeatureSection({
   )
 }
 
-// ----- §03 Identity silhouettes -----
-const IdentityBefore = () => <PortraitSilhouette palette={PORTRAIT.identityBefore} />
-const IdentityAfter = () => <PortraitSilhouette palette={PORTRAIT.identityAfter} />
+// ----- §03 Identity -----
+const IdentityBefore = () => (
+  <img src="/demos/identity-before.webp" alt="" className="w-full h-full object-cover" loading="lazy" />
+)
+const IdentityAfter = () => (
+  <img src="/demos/identity-after.webp" alt="" className="w-full h-full object-cover" loading="lazy" />
+)
 
-// ----- §04 Resolution silhouettes -----
-const ResolutionBefore = () => <PortraitSilhouette palette={PORTRAIT.resBefore} />
-const ResolutionAfter = () => <PortraitSilhouette palette={PORTRAIT.resAfter} />
+// ----- §04 Resolution -----
+const ResolutionBefore = () => (
+  <img src="/demos/resolution-before.webp" alt="" className="w-full h-full object-cover" loading="lazy" />
+)
+const ResolutionAfter = () => (
+  <img src="/demos/resolution-after.webp" alt="" className="w-full h-full object-cover" loading="lazy" />
+)
 
-// ----- §05 Lighting silhouettes -----
-const LightingBefore = () => <PortraitSilhouette palette={PORTRAIT.lightBefore} />
-const LightingAfter = () => <PortraitSilhouette palette={PORTRAIT.lightAfter} />
+// ----- §05 Lighting -----
+const LightingBefore = () => (
+  <img src="/demos/lighting-before.webp" alt="" className="w-full h-full object-cover" loading="lazy" />
+)
+const LightingAfter = () => (
+  <img src="/demos/lighting-after.webp" alt="" className="w-full h-full object-cover" loading="lazy" />
+)
 
 // ----------------------------------------------------------------
 // §06 — Presets grid
@@ -586,7 +602,7 @@ function Footer() {
           ))}
         </div>
         <div className="flex justify-between items-center pt-6 border-t border-[#1F1D1B] flex-wrap gap-3">
-          <div className="text-xs text-soft-muted">© 2025 RealLife AI, Inc.</div>
+          <div className="text-xs text-soft-muted">© 2026 RealLife AI, Inc.</div>
           <div className="flex gap-4">
             {social.map(s => (
               <a
@@ -661,7 +677,7 @@ export default function Home() {
         bg="cream"
       />
 
-      <PresetsGrid />
+      {/* <PresetsGrid /> */}
       <UseCases />
       <PricingCTA />
       <Footer />
