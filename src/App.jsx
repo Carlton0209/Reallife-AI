@@ -63,7 +63,7 @@ function Header({ currentStep }) {
         ))}
       </div>
       <div className="justify-self-end flex items-center gap-2.5 font-mono text-[10px] tracking-[0.12em] text-secondary">
-        <span>JC</span>
+        <span></span>
         <div className="w-[22px] h-[22px] border border-hairline rounded-full" />
       </div>
     </div>
