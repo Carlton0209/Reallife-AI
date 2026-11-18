@@ -119,7 +119,20 @@ Footer's newsletter currently just `console.log`s the email. Find `onSubmit={(e)
 
 ### Connect the product UI to ComfyUI
 
-In `App.jsx`'s `EnhanceView`, replace the simulated `setInterval` progress loop with real fetch calls to your ComfyUI API. The `imageData.url` / `imageData.enhancedUrl` flow is already wired through to `CompareView`.
+The product UI calls a local ComfyUI directly from the browser (`src/lib/comfyui.js`, default `http://127.0.0.1:8188`, override with `VITE_COMFY_URL`). ComfyUI must allow cross-origin requests, so start it with `--enable-cors-header`:
+
+```bash
+python_embeded\python.exe -I ComfyUI\main.py --windows-standalone-build --enable-cors-header "*"
+```
+
+Two workflows are wired in (API format, in `src/workflows/`):
+
+| Step | Workflow | Notes |
+|---|---|---|
+| 02 Enhance | `portrait-enhance.json` | Flux 2 Klein + Anything2Real LoRA, z-Image Turbo refine, Lanczos 2× |
+| 04 Export → `2K · SEEDVR2` | `seedvr2-upscale.json` | API copy of `SeedVR/图片高清放大2K.json`: SeedVR2 7B Q4 GGUF, short edge 2048, any edge ≤ 2048 |
+
+The SeedVR2 step needs the [ComfyUI-SeedVR2_VideoUpscaler](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler) nodes and `models/SEEDVR2/seedvr2_ema_7b-Q4_K_M.gguf` + `ema_vae_fp16.safetensors`. If you change the workflow in ComfyUI, re-export it with **Export (API)** and keep the node IDs in `UPSCALE_NODE_IDS` (`App.jsx`) in sync.
 
 ---
 

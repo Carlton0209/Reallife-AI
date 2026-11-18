@@ -1,7 +1,8 @@
 import { useState, useRef, useEffect } from 'react'
 import CompareSlider from './CompareSlider'
-import { runEnhance } from './lib/comfyui'
+import { runEnhance, runWorkflow, fetchImageBlob } from './lib/comfyui'
 import workflowTemplate from './workflows/portrait-enhance.json'
+import upscaleWorkflow from './workflows/seedvr2-upscale.json'
 
 // ============================================================
 // RealLife AI — Swiss Minimalist UI
@@ -30,6 +31,45 @@ const PRESET_PROMPTS = {
   cinematic:   '2k, 4K, cinematic grade, teal-orange, film stock highlights, shallow depth of field',
   studio:      '2k, 4K, high-key studio lighting, commercial portrait, clean background, sharp detail',
   documentary: '2k, 4K, documentary style, natural candid light, honest skin texture, editorial',
+}
+
+// SeedVR2 HD upscale used by the Export step.
+// src/workflows/seedvr2-upscale.json is the API-format copy of the ComfyUI workflow
+// user/default/workflows/SeedVR/图片高清放大2K.json (same models and settings; the
+// bypassed resize node and the canvas-only Image Comparer are left out).
+const UPSCALE_NODE_IDS = {
+  input:    '1',  // LoadImage — receives the enhanced result
+  upscaler: '5',  // SeedVR2VideoUpscaler
+  output:   '6',  // SaveImage
+}
+
+// Export resolutions.
+//   native     = the Enhance output as-is (its last step is a Lanczos 2× resize)
+//   seedvr2_2k = the 2K SeedVR2 workflow run on that output: short edge 2048, any edge ≤ 2048
+const EXPORT_TARGETS = {
+  native:     { label: 'NATIVE',       engine: 'LANCZOS 2× · ENHANCE PASS' },
+  seedvr2_2k: { label: '2K · SEEDVR2', engine: 'SEEDVR2 7B · Q4 GGUF', resolution: 2048, maxResolution: 2048 },
+}
+
+// Mirrors SeedVR2's resize: scale the short edge to `resolution`, then cap any edge at `maxResolution`.
+// SeedVR2 rounds each edge down to an even number (e.g. 3840×2560 → 2048×1364).
+function seedvr2Dims(width, height, resolution, maxResolution) {
+  let s = resolution / Math.min(width, height)
+  if (maxResolution > 0 && Math.max(width, height) * s > maxResolution) {
+    s = maxResolution / Math.max(width, height)
+  }
+  const even = (n) => Math.floor(n / 2) * 2
+  return { width: even(width * s), height: even(height * s) }
+}
+
+function probeImageSize(url) {
+  return new Promise((resolve, reject) => {
+    const img = new Image()
+    img.crossOrigin = 'anonymous'
+    img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight })
+    img.onerror = () => reject(new Error('Image failed to load'))
+    img.src = url
+  })
 }
 
 const STEPS = [
@@ -391,23 +431,103 @@ function CompareView({ imageData, preset, onPresetChange, onExport, onBack, onRe
 // 04 — Export
 // ------------------------------------------------------------
 function ExportView({ imageData, onBack }) {
-  const [resolution, setResolution] = useState(1)
+  const [target, setTarget] = useState('native')
   const [format, setFormat] = useState('JPG')
   const [colorProfile, setColorProfile] = useState('sRGB')
+  const [nativeDims, setNativeDims] = useState(null)
+  const [upscaled, setUpscaled] = useState({})   // target key → { url, width, height, seconds }
+  const [job, setJob] = useState(null)           // running SeedVR2 job: { target, progress, stage, elapsed }
+  const [errorMsg, setErrorMsg] = useState(null)
+  const abortRef = useRef(null)
 
-  // ComfyUI already outputs 2× upscaled, so 1× here = native output (~3840 long edge).
-  // Further multipliers are client-side naive upscale via canvas.
-  const sizeMap = {
-    1: { dim: 'native',    size: '~12 MB' },
-    2: { dim: '2× canvas', size: '~40 MB' },
-    4: { dim: '4× canvas', size: '~160 MB' },
+  const nativeUrl = imageData?.enhancedUrl || imageData?.url
+  const spec = EXPORT_TARGETS[target]
+  const isSeedVR2 = target !== 'native'
+  const result = isSeedVR2 ? upscaled[target] : null
+  const previewUrl = result?.url || nativeUrl
+  const needsRender = isSeedVR2 && !result
+  const running = job !== null
+
+  // Real pixel size of the Enhance output, used for the SeedVR2 size estimate.
+  useEffect(() => {
+    if (!nativeUrl) return
+    let alive = true
+    probeImageSize(nativeUrl).then((d) => { if (alive) setNativeDims(d) }).catch(() => {})
+    return () => { alive = false }
+  }, [nativeUrl])
+
+  // Leaving the Export step cancels a running upscale (client and server side).
+  useEffect(() => () => abortRef.current?.abort(), [])
+
+  const dims = !isSeedVR2
+    ? nativeDims
+    : result || (nativeDims && seedvr2Dims(nativeDims.width, nativeDims.height, spec.resolution, spec.maxResolution))
+  const dimText = dims ? `${needsRender ? '≈ ' : ''}${dims.width} × ${dims.height}` : '—'
+
+  const runUpscale = async () => {
+    if (!nativeUrl || running) return
+    const jobTarget = target
+    const jobSpec = EXPORT_TARGETS[jobTarget]
+    const controller = new AbortController()
+    abortRef.current = controller
+    const start = Date.now()
+    setErrorMsg(null)
+    setJob({ target: jobTarget, progress: 0, stage: 'Fetching enhanced image', elapsed: 0 })
+    const tick = setInterval(() => {
+      setJob((j) => j && { ...j, elapsed: (Date.now() - start) / 1000 })
+    }, 100)
+
+    try {
+      // Feed the Enhance result back into ComfyUI as the SeedVR2 input.
+      const blob = await fetchImageBlob(nativeUrl)
+      const workflow = JSON.parse(JSON.stringify(upscaleWorkflow))
+      workflow[UPSCALE_NODE_IDS.upscaler].inputs.resolution = jobSpec.resolution
+      workflow[UPSCALE_NODE_IDS.upscaler].inputs.max_resolution = jobSpec.maxResolution
+      const base = imageData?.name?.replace(/\.[^/.]+$/, '') || 'portrait'
+
+      const { url, image } = await runWorkflow({
+        file: blob,
+        fileName: `${base}_reallife_enhanced.png`,
+        workflowTemplate: workflow,
+        inputNodeId: UPSCALE_NODE_IDS.input,
+        outputNodeId: UPSCALE_NODE_IDS.output,
+        onStage: (stage) => setJob((j) => j && { ...j, stage }),
+        onProgress: ({ value, max }) => {
+          if (max > 0) setJob((j) => j && { ...j, progress: (value / max) * 100 })
+        },
+        signal: controller.signal,
+      })
+
+      const size = image?.metadata?.width
+        ? { width: image.metadata.width, height: image.metadata.height }
+        : await probeImageSize(url)
+      setUpscaled((prev) => ({
+        ...prev,
+        [jobTarget]: { url, ...size, seconds: (Date.now() - start) / 1000 },
+      }))
+    } catch (err) {
+      if (err.message !== 'Aborted') {
+        console.error('SeedVR2 upscale failed:', err)
+        setErrorMsg(err.message)
+      }
+    } finally {
+      clearInterval(tick)
+      if (abortRef.current === controller) abortRef.current = null
+      if (!controller.signal.aborted) setJob(null)
+    }
   }
-  const current = sizeMap[resolution]
 
-  const OptButton = ({ active, onClick, children }) => (
+  const cancelUpscale = () => {
+    abortRef.current?.abort()
+    abortRef.current = null
+    setJob(null)
+  }
+
+  const OptButton = ({ active, onClick, children, disabled }) => (
     <button
       onClick={onClick}
-      className={`px-3.5 py-2 border font-mono text-[10px] tracking-[0.14em] transition-colors ${
+      disabled={disabled}
+      className={`px-3.5 py-2 border font-mono text-[10px] tracking-[0.14em] transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
         active
           ? 'bg-ink text-white border-ink'
           : 'bg-transparent text-ink border-concrete-dark hover:border-secondary'
@@ -418,7 +538,7 @@ function ExportView({ imageData, onBack }) {
   )
 
   const handleDownload = async () => {
-    const sourceUrl = imageData?.enhancedUrl || imageData?.url
+    const sourceUrl = previewUrl
     if (!sourceUrl) {
       console.warn('No image to download')
       return
@@ -426,7 +546,8 @@ function ExportView({ imageData, onBack }) {
 
     const ext = format.toLowerCase() === 'tiff' ? 'png' : format.toLowerCase()
     const base = imageData?.name?.replace(/\.[^/.]+$/, '') || 'portrait'
-    const filename = `${base}_reallife_${resolution}x.${ext}`
+    const suffix = isSeedVR2 ? target.replace('_', '-') : 'native'
+    const filename = `${base}_reallife_${suffix}.${ext}`
 
     try {
       const img = new Image()
@@ -437,9 +558,10 @@ function ExportView({ imageData, onBack }) {
         img.src = sourceUrl
       })
 
+      // Re-encode at 1:1 for the chosen format (resolution comes from the selected engine).
       const canvas = document.createElement('canvas')
-      canvas.width = img.naturalWidth * resolution
-      canvas.height = img.naturalHeight * resolution
+      canvas.width = img.naturalWidth
+      canvas.height = img.naturalHeight
       const ctx = canvas.getContext('2d')
       ctx.imageSmoothingEnabled = true
       ctx.imageSmoothingQuality = 'high'
@@ -472,23 +594,58 @@ function ExportView({ imageData, onBack }) {
     <div className="bg-white">
       <div className="p-5 grid grid-cols-2 gap-7">
         <div>
-          <Mono className="text-[10px] text-secondary tracking-[0.14em] block mb-2.5">FINAL RESULT</Mono>
-          <div className="aspect-square bg-ink overflow-hidden">
-            {imageData?.url && (
+          <div className="flex justify-between mb-2.5">
+            <Mono className="text-[10px] text-secondary tracking-[0.14em]">FINAL RESULT</Mono>
+            {result && (
+              <a
+                href={result.url}
+                target="_blank"
+                rel="noreferrer"
+                className="font-mono text-[10px] tracking-[0.14em] text-secondary hover:text-ink transition-colors"
+              >
+                VIEW&nbsp;100%&nbsp;↗
+              </a>
+            )}
+          </div>
+          <div className="relative aspect-square bg-ink overflow-hidden">
+            {previewUrl && (
               <img
-                src={imageData.enhancedUrl || imageData.url}
+                src={previewUrl}
                 alt="result"
-                className="w-full h-full object-cover"
+                className={`w-full h-full object-cover transition-opacity ${needsRender || running ? 'opacity-45' : ''}`}
               />
+            )}
+            {running && (
+              <div className="absolute inset-x-0 bottom-0 p-3.5 text-white font-mono">
+                <div className="flex justify-between mb-2 text-[10px] tracking-[0.14em]">
+                  <span className="flex items-center gap-2">
+                    <span className="w-1.5 h-1.5 bg-accent rounded-full animate-pulse" />
+                    SEEDVR2&nbsp;·&nbsp;{job.stage.toUpperCase()}
+                  </span>
+                  <span>{Math.round(job.progress)}%</span>
+                </div>
+                <div className="h-0.5 bg-white/25">
+                  <div className="h-full bg-white transition-all duration-100 ease-linear" style={{ width: `${job.progress}%` }} />
+                </div>
+              </div>
+            )}
+            {needsRender && !running && (
+              <div className="absolute inset-0 flex items-center justify-center">
+                <span className="font-mono text-[10px] tracking-[0.16em] text-white bg-ink/70 px-3 py-1.5">
+                  NOT&nbsp;RENDERED&nbsp;YET
+                </span>
+              </div>
             )}
           </div>
         </div>
         <div>
           <div className="mb-5">
             <Mono className="text-[10px] text-secondary tracking-[0.14em] block mb-2.5">RESOLUTION</Mono>
-            <div className="flex gap-1.5">
-              {[1, 2, 4].map(r => (
-                <OptButton key={r} active={resolution === r} onClick={() => setResolution(r)}>{r}×</OptButton>
+            <div className="flex gap-1.5 flex-wrap">
+              {Object.entries(EXPORT_TARGETS).map(([key, t]) => (
+                <OptButton key={key} active={target === key} disabled={running} onClick={() => setTarget(key)}>
+                  {t.label}
+                </OptButton>
               ))}
             </div>
           </div>
@@ -511,27 +668,51 @@ function ExportView({ imageData, onBack }) {
           <div className="border-t border-hairline pt-3.5 font-mono text-[10px] tracking-[0.1em]">
             <div className="flex justify-between mb-1">
               <span className="text-secondary">DIMENSIONS</span>
-              <span>{current.dim}</span>
+              <span>{dimText}</span>
             </div>
-            <div className="flex justify-between">
-              <span className="text-secondary">ESTIMATED SIZE</span>
-              <span>{current.size}</span>
+            <div className="flex justify-between mb-1">
+              <span className="text-secondary">ENGINE</span>
+              <span>{spec.engine}</span>
             </div>
+            {isSeedVR2 && (
+              <div className="flex justify-between">
+                <span className="text-secondary">RENDER TIME</span>
+                <span>
+                  {running && job.target === target
+                    ? `${job.elapsed.toFixed(1)}s`
+                    : result ? `${result.seconds.toFixed(1)}s` : '—'}
+                </span>
+              </div>
+            )}
           </div>
         </div>
       </div>
+      {errorMsg && (
+        <div className="px-5 pb-5">
+          <div className="border border-accent p-4 font-mono text-[11px] tracking-[0.06em] leading-6">
+            <div className="text-accent mb-2">SEEDVR2 UPSCALE FAILED</div>
+            <div className="text-secondary break-words">{errorMsg}</div>
+            <div className="text-secondary mt-3 text-[10px]">
+              Check: ComfyUI running at {import.meta.env.VITE_COMFY_URL || 'http://127.0.0.1:8188'} · CORS enabled · SeedVR2 nodes and models installed
+            </div>
+          </div>
+        </div>
+      )}
       <div className="border-t border-hairline px-5 py-4 flex justify-between items-center">
         <button
-          onClick={onBack}
+          onClick={running ? cancelUpscale : onBack}
           className="bg-transparent font-mono text-[10px] tracking-[0.14em] text-secondary hover:text-ink transition-colors"
         >
-          ←&nbsp;&nbsp;BACK
+          {running ? <>×&nbsp;&nbsp;CANCEL</> : <>←&nbsp;&nbsp;BACK</>}
         </button>
         <button
-          onClick={handleDownload}
-          className="px-6 py-2.5 bg-ink text-white font-mono text-[10px] tracking-[0.18em] hover:opacity-85 transition-opacity"
+          onClick={needsRender ? runUpscale : handleDownload}
+          disabled={running}
+          className="px-6 py-2.5 bg-ink text-white font-mono text-[10px] tracking-[0.18em] hover:opacity-85 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
         >
-          DOWNLOAD&nbsp;&nbsp;→
+          {running
+            ? <>UPSCALING&nbsp;&nbsp;{Math.round(job.progress)}%</>
+            : needsRender ? <>RUN&nbsp;SEEDVR2&nbsp;&nbsp;→</> : <>DOWNLOAD&nbsp;&nbsp;→</>}
         </button>
       </div>
     </div>
