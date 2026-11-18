@@ -10,6 +10,10 @@ import CompareSlider from './CompareSlider'
 // pointing at your before/after assets for production.
 // ============================================================
 
+// Before/after photos live in public/demos/. Prefix with Vite's base URL so they
+// resolve both at the domain root (Vercel) and under /Reallife-AI/ (GitHub Pages).
+const demo = (file) => `${import.meta.env.BASE_URL}demos/${file}`
+
 // ----------------------------------------------------------------
 // Shared — portrait silhouette + palette map + marquee
 // ----------------------------------------------------------------
@@ -179,10 +183,10 @@ function Nav() {
 // §01 — Hero
 // ----------------------------------------------------------------
 const HeroBefore = () => (
-  <img src="/demos/hero-before.webp" alt="" className="w-full h-full object-cover" loading="eager" />
+  <img src={demo('hero-before.webp')} alt="" className="w-full h-full object-cover" loading="eager" />
 )
 const HeroAfter = () => (
-  <img src="/demos/hero-after.webp" alt="" className="w-full h-full object-cover" loading="eager" />
+  <img src={demo('hero-after.webp')} alt="" className="w-full h-full object-cover" loading="eager" />
 )
 
 function Hero() {
@@ -331,26 +335,26 @@ function FeatureSection({
 
 // ----- §03 Identity -----
 const IdentityBefore = () => (
-  <img src="/demos/identity-before.webp" alt="" className="w-full h-full object-cover" loading="lazy" />
+  <img src={demo('identity-before.webp')} alt="" className="w-full h-full object-cover" loading="lazy" />
 )
 const IdentityAfter = () => (
-  <img src="/demos/identity-after.webp" alt="" className="w-full h-full object-cover" loading="lazy" />
+  <img src={demo('identity-after.webp')} alt="" className="w-full h-full object-cover" loading="lazy" />
 )
 
 // ----- §04 Resolution -----
 const ResolutionBefore = () => (
-  <img src="/demos/resolution-before.webp" alt="" className="w-full h-full object-cover" loading="lazy" />
+  <img src={demo('resolution-before.webp')} alt="" className="w-full h-full object-cover" loading="lazy" />
 )
 const ResolutionAfter = () => (
-  <img src="/demos/resolution-after.webp" alt="" className="w-full h-full object-cover" loading="lazy" />
+  <img src={demo('resolution-after.webp')} alt="" className="w-full h-full object-cover" loading="lazy" />
 )
 
 // ----- §05 Lighting -----
 const LightingBefore = () => (
-  <img src="/demos/lighting-before.webp" alt="" className="w-full h-full object-cover" loading="lazy" />
+  <img src={demo('lighting-before.webp')} alt="" className="w-full h-full object-cover" loading="lazy" />
 )
 const LightingAfter = () => (
-  <img src="/demos/lighting-after.webp" alt="" className="w-full h-full object-cover" loading="lazy" />
+  <img src={demo('lighting-after.webp')} alt="" className="w-full h-full object-cover" loading="lazy" />
 )
 
 // ----------------------------------------------------------------
