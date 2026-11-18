@@ -125,14 +125,11 @@ The product UI calls a local ComfyUI directly from the browser (`src/lib/comfyui
 python_embeded\python.exe -I ComfyUI\main.py --windows-standalone-build --enable-cors-header "*"
 ```
 
-Two workflows are wired in (API format, in `src/workflows/`):
+The **02 Enhance** step runs `src/workflows/seedvr2-upscale.json`, the API-format copy of the ComfyUI workflow `SeedVR/图片高清放大2K.json`: SeedVR2 7B Q4 GGUF, short edge 2048, no edge above 2048. Compare and Export show and download that result; there is no second pass.
 
-| Step | Workflow | Notes |
-|---|---|---|
-| 02 Enhance | `portrait-enhance.json` | Flux 2 Klein + Anything2Real LoRA, z-Image Turbo refine, Lanczos 2× |
-| 04 Export → `2K · SEEDVR2` | `seedvr2-upscale.json` | API copy of `SeedVR/图片高清放大2K.json`: SeedVR2 7B Q4 GGUF, short edge 2048, any edge ≤ 2048 |
+It needs the [ComfyUI-SeedVR2_VideoUpscaler](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler) nodes and `models/SEEDVR2/seedvr2_ema_7b-Q4_K_M.gguf` + `ema_vae_fp16.safetensors`. If you change the workflow in ComfyUI, re-export it with **Export (API)** and keep the node IDs in `NODE_IDS` (`App.jsx`) in sync.
 
-The SeedVR2 step needs the [ComfyUI-SeedVR2_VideoUpscaler](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler) nodes and `models/SEEDVR2/seedvr2_ema_7b-Q4_K_M.gguf` + `ema_vae_fp16.safetensors`. If you change the workflow in ComfyUI, re-export it with **Export (API)** and keep the node IDs in `UPSCALE_NODE_IDS` (`App.jsx`) in sync.
+`src/workflows/portrait-enhance.json` (Flux 2 Klein + Anything2Real LoRA, z-Image Turbo refine) is kept for reference but not wired in: its models (`flux-2-klein-4b-fp8`, `qwen_3_4b`, `z_image_turbo_bf16`, `zImageTurboVAE_v10`, the Anything2Real LoRA) aren't part of the local install.
 
 ---
 

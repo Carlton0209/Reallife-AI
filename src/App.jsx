@@ -1,66 +1,25 @@
 import { useState, useRef, useEffect } from 'react'
 import CompareSlider from './CompareSlider'
-import { runEnhance, runWorkflow, fetchImageBlob } from './lib/comfyui'
-import workflowTemplate from './workflows/portrait-enhance.json'
-import upscaleWorkflow from './workflows/seedvr2-upscale.json'
+import { runEnhance } from './lib/comfyui'
+import enhanceWorkflow from './workflows/seedvr2-upscale.json'
 
 // ============================================================
 // RealLife AI — Swiss Minimalist UI
 // Flow: upload → enhance → compare → export
 // ============================================================
 
-// Wiring between the Swiss 4-step UI and the ComfyUI workflow.
-// These keys MUST match the node IDs in src/workflows/portrait-enhance.json.
-//   input  = LoadImage node (receives the uploaded filename)
-//   output = SaveImage node (final 2× upscaled result)
-//   prompt = CR Prompt Text node (lets style presets change the prompt)
-//   seed1 = primary KSampler (Flux 2 Klein stage)
-//   seed2 = advanced KSampler (z-Image Turbo stage)
+// The Enhance step runs the SeedVR2 2K upscale. src/workflows/seedvr2-upscale.json is
+// the API-format copy of the ComfyUI workflow user/default/workflows/SeedVR/图片高清放大2K.json
+// (same models and settings; the bypassed resize node and the canvas-only Image Comparer
+// are left out). Output: short edge 2048, no edge above 2048, each edge rounded down to
+// an even number (e.g. 3840×2560 → 2048×1364, 640×800 → 1638×2048).
+// These keys MUST match the node IDs in that file.
 const NODE_IDS = {
-  input:  '28',
-  output: '94',
-  prompt: '61',
-  seed1:  '53',
-  seed2:  '95',
+  input:  '1',  // LoadImage — receives the uploaded file
+  output: '6',  // SaveImage
 }
 
-// Style presets — each overrides the prompt text injected into node 61.
-// Keep these short and photo-oriented; the LoRA does the heavy lifting.
-const PRESET_PROMPTS = {
-  natural:     '2k, 4K, natural daylight, true-to-life skin tones, photographic texture',
-  cinematic:   '2k, 4K, cinematic grade, teal-orange, film stock highlights, shallow depth of field',
-  studio:      '2k, 4K, high-key studio lighting, commercial portrait, clean background, sharp detail',
-  documentary: '2k, 4K, documentary style, natural candid light, honest skin texture, editorial',
-}
-
-// SeedVR2 HD upscale used by the Export step.
-// src/workflows/seedvr2-upscale.json is the API-format copy of the ComfyUI workflow
-// user/default/workflows/SeedVR/图片高清放大2K.json (same models and settings; the
-// bypassed resize node and the canvas-only Image Comparer are left out).
-const UPSCALE_NODE_IDS = {
-  input:    '1',  // LoadImage — receives the enhanced result
-  upscaler: '5',  // SeedVR2VideoUpscaler
-  output:   '6',  // SaveImage
-}
-
-// Export resolutions.
-//   native     = the Enhance output as-is (its last step is a Lanczos 2× resize)
-//   seedvr2_2k = the 2K SeedVR2 workflow run on that output: short edge 2048, any edge ≤ 2048
-const EXPORT_TARGETS = {
-  native:     { label: 'NATIVE',       engine: 'LANCZOS 2× · ENHANCE PASS' },
-  seedvr2_2k: { label: '2K · SEEDVR2', engine: 'SEEDVR2 7B · Q4 GGUF', resolution: 2048, maxResolution: 2048 },
-}
-
-// Mirrors SeedVR2's resize: scale the short edge to `resolution`, then cap any edge at `maxResolution`.
-// SeedVR2 rounds each edge down to an even number (e.g. 3840×2560 → 2048×1364).
-function seedvr2Dims(width, height, resolution, maxResolution) {
-  let s = resolution / Math.min(width, height)
-  if (maxResolution > 0 && Math.max(width, height) * s > maxResolution) {
-    s = maxResolution / Math.max(width, height)
-  }
-  const even = (n) => Math.floor(n / 2) * 2
-  return { width: even(width * s), height: even(height * s) }
-}
+const ENGINE_LABEL = 'SEEDVR2 7B · Q4 GGUF · 2K'
 
 function probeImageSize(url) {
   return new Promise((resolve, reject) => {
@@ -185,7 +144,7 @@ function UploadView({ onFileSelected }) {
 // ------------------------------------------------------------
 // 02 — Enhance (real ComfyUI API call)
 // ------------------------------------------------------------
-function EnhanceView({ imageData, preset, onComplete, onCancel }) {
+function EnhanceView({ imageData, onComplete, onCancel }) {
   const [progress, setProgress] = useState(0)
   const [elapsed, setElapsed] = useState(0)
   const [stage, setStage] = useState('Starting')
@@ -201,23 +160,9 @@ function EnhanceView({ imageData, preset, onComplete, onCancel }) {
     const start = Date.now()
     const tick = setInterval(() => setElapsed((Date.now() - start) / 1000), 100)
 
-    // Deep clone so we can safely mutate per-run (seed, prompt, input filename)
-    const workflow = JSON.parse(JSON.stringify(workflowTemplate))
-
-    // 1. Swap in the preset's prompt (node 61)
-    if (workflow[NODE_IDS.prompt]) {
-      workflow[NODE_IDS.prompt].inputs.prompt =
-        PRESET_PROMPTS[preset] || PRESET_PROMPTS.natural
-    }
-
-    // 2. Randomize seeds so repeat runs look a bit different
-    //    Use Math.random * 1e15 — within JS safe-int range and matches ComfyUI's seed format
-    if (workflow[NODE_IDS.seed1]) {
-      workflow[NODE_IDS.seed1].inputs.seed = Math.floor(Math.random() * 1e15)
-    }
-    if (workflow[NODE_IDS.seed2]) {
-      workflow[NODE_IDS.seed2].inputs.noise_seed = Math.floor(Math.random() * 1e15)
-    }
+    // Deep clone: runEnhance writes the uploaded filename into the LoadImage node.
+    // Everything else (seed 9527, models, 2048 limits) stays as in the ComfyUI workflow.
+    const workflow = JSON.parse(JSON.stringify(enhanceWorkflow))
 
     runEnhance({
       file: imageData.file,
@@ -246,7 +191,7 @@ function EnhanceView({ imageData, preset, onComplete, onCancel }) {
       controller.abort()
       clearInterval(tick)
     }
-  }, [imageData, preset, onComplete])
+  }, [imageData, onComplete])
 
   // Error state
   if (errorMsg) {
@@ -257,7 +202,7 @@ function EnhanceView({ imageData, preset, onComplete, onCancel }) {
             <div className="text-accent mb-2">ENHANCEMENT FAILED</div>
             <div className="text-secondary">{errorMsg}</div>
             <div className="text-secondary mt-3 text-[10px]">
-              Check: ComfyUI running at {import.meta.env.VITE_COMFY_URL || 'http://127.0.0.1:8188'} · CORS enabled · node IDs correct
+              Check: ComfyUI running at {import.meta.env.VITE_COMFY_URL || 'http://127.0.0.1:8188'} · CORS enabled · SeedVR2 nodes and models installed
             </div>
           </div>
         </div>
@@ -299,9 +244,8 @@ function EnhanceView({ imageData, preset, onComplete, onCancel }) {
         </div>
       </div>
       <div className="border-t border-hairline px-5 py-3.5 font-mono text-[10px] leading-7 text-secondary">
-        <div>› preset: {preset}</div>
-        <div>› flux 2 klein 4B + anything2real LoRA</div>
-        <div>› z-image turbo refinement pass</div>
+        <div>› seedvr2 7B · Q4 GGUF</div>
+        <div>› 2K: short edge 2048, long edge ≤ 2048</div>
         <div className="text-ink">› {stage}...</div>
       </div>
       <div className="border-t border-hairline px-5 py-4 flex justify-between items-center">
@@ -327,10 +271,9 @@ function EnhanceView({ imageData, preset, onComplete, onCancel }) {
 // ------------------------------------------------------------
 // 03 — Compare
 // ------------------------------------------------------------
-function CompareView({ imageData, preset, onPresetChange, onExport, onBack, onRerun }) {
+function CompareView({ imageData, onExport, onBack }) {
   const [intensity, setIntensity] = useState(72)
   const [identityLock, setIdentityLock] = useState(true)
-  const presets = Object.keys(PRESET_PROMPTS)
 
   const beforeUrl = imageData?.url
   const afterUrl = imageData?.enhancedUrl || imageData?.url
@@ -353,7 +296,7 @@ function CompareView({ imageData, preset, onPresetChange, onExport, onBack, onRe
         />
         <div className="flex justify-between mt-2.5 font-mono text-[10px] tracking-[0.1em] text-secondary">
           <span>{fileName}</span>
-          <span>PRESET&nbsp;{preset.toUpperCase()}&nbsp;&nbsp;·&nbsp;&nbsp;IDENTITY&nbsp;LOCKED</span>
+          <span>SEEDVR2&nbsp;2K&nbsp;&nbsp;·&nbsp;&nbsp;IDENTITY&nbsp;LOCKED</span>
         </div>
       </div>
       <div className="border-t border-hairline px-5 py-4 grid grid-cols-2 gap-8">
@@ -382,33 +325,6 @@ function CompareView({ imageData, preset, onPresetChange, onExport, onBack, onRe
           </button>
         </div>
       </div>
-      <div className="border-t border-hairline px-5 py-4">
-        <div className="flex justify-between items-center mb-3">
-          <Mono className="text-[10px] text-secondary tracking-[0.14em]">STYLE PRESET</Mono>
-          <button
-            onClick={onRerun}
-            className="font-mono text-[10px] tracking-[0.14em] text-secondary hover:text-ink transition-colors"
-            title="Rerun the workflow with the selected preset"
-          >
-            ↻&nbsp;&nbsp;RERUN
-          </button>
-        </div>
-        <div className="flex gap-2 flex-wrap">
-          {presets.map(p => (
-            <button
-              key={p}
-              onClick={() => onPresetChange(p)}
-              className={`px-3.5 py-1.5 border font-mono text-[10px] tracking-[0.14em] transition-colors ${
-                preset === p
-                  ? 'bg-ink text-white border-ink'
-                  : 'bg-white text-ink border-concrete-dark hover:border-secondary'
-              }`}
-            >
-              {p.toUpperCase()}
-            </button>
-          ))}
-        </div>
-      </div>
       <div className="border-t border-hairline px-5 py-4 flex justify-between items-center">
         <button
           onClick={onBack}
@@ -431,97 +347,21 @@ function CompareView({ imageData, preset, onPresetChange, onExport, onBack, onRe
 // 04 — Export
 // ------------------------------------------------------------
 function ExportView({ imageData, onBack }) {
-  const [target, setTarget] = useState('native')
   const [format, setFormat] = useState('JPG')
   const [colorProfile, setColorProfile] = useState('sRGB')
-  const [nativeDims, setNativeDims] = useState(null)
-  const [upscaled, setUpscaled] = useState({})   // target key → { url, width, height, seconds }
-  const [job, setJob] = useState(null)           // running SeedVR2 job: { target, progress, stage, elapsed }
-  const [errorMsg, setErrorMsg] = useState(null)
-  const abortRef = useRef(null)
+  const [dims, setDims] = useState(null)
 
-  const nativeUrl = imageData?.enhancedUrl || imageData?.url
-  const spec = EXPORT_TARGETS[target]
-  const isSeedVR2 = target !== 'native'
-  const result = isSeedVR2 ? upscaled[target] : null
-  const previewUrl = result?.url || nativeUrl
-  const needsRender = isSeedVR2 && !result
-  const running = job !== null
+  // The Enhance step already produced the 2K SeedVR2 image; Export only re-encodes it.
+  const resultUrl = imageData?.enhancedUrl || imageData?.url
 
-  // Real pixel size of the Enhance output, used for the SeedVR2 size estimate.
   useEffect(() => {
-    if (!nativeUrl) return
+    if (!resultUrl) return
     let alive = true
-    probeImageSize(nativeUrl).then((d) => { if (alive) setNativeDims(d) }).catch(() => {})
+    probeImageSize(resultUrl).then((d) => { if (alive) setDims(d) }).catch(() => {})
     return () => { alive = false }
-  }, [nativeUrl])
+  }, [resultUrl])
 
-  // Leaving the Export step cancels a running upscale (client and server side).
-  useEffect(() => () => abortRef.current?.abort(), [])
-
-  const dims = !isSeedVR2
-    ? nativeDims
-    : result || (nativeDims && seedvr2Dims(nativeDims.width, nativeDims.height, spec.resolution, spec.maxResolution))
-  const dimText = dims ? `${needsRender ? '≈ ' : ''}${dims.width} × ${dims.height}` : '—'
-
-  const runUpscale = async () => {
-    if (!nativeUrl || running) return
-    const jobTarget = target
-    const jobSpec = EXPORT_TARGETS[jobTarget]
-    const controller = new AbortController()
-    abortRef.current = controller
-    const start = Date.now()
-    setErrorMsg(null)
-    setJob({ target: jobTarget, progress: 0, stage: 'Fetching enhanced image', elapsed: 0 })
-    const tick = setInterval(() => {
-      setJob((j) => j && { ...j, elapsed: (Date.now() - start) / 1000 })
-    }, 100)
-
-    try {
-      // Feed the Enhance result back into ComfyUI as the SeedVR2 input.
-      const blob = await fetchImageBlob(nativeUrl)
-      const workflow = JSON.parse(JSON.stringify(upscaleWorkflow))
-      workflow[UPSCALE_NODE_IDS.upscaler].inputs.resolution = jobSpec.resolution
-      workflow[UPSCALE_NODE_IDS.upscaler].inputs.max_resolution = jobSpec.maxResolution
-      const base = imageData?.name?.replace(/\.[^/.]+$/, '') || 'portrait'
-
-      const { url, image } = await runWorkflow({
-        file: blob,
-        fileName: `${base}_reallife_enhanced.png`,
-        workflowTemplate: workflow,
-        inputNodeId: UPSCALE_NODE_IDS.input,
-        outputNodeId: UPSCALE_NODE_IDS.output,
-        onStage: (stage) => setJob((j) => j && { ...j, stage }),
-        onProgress: ({ value, max }) => {
-          if (max > 0) setJob((j) => j && { ...j, progress: (value / max) * 100 })
-        },
-        signal: controller.signal,
-      })
-
-      const size = image?.metadata?.width
-        ? { width: image.metadata.width, height: image.metadata.height }
-        : await probeImageSize(url)
-      setUpscaled((prev) => ({
-        ...prev,
-        [jobTarget]: { url, ...size, seconds: (Date.now() - start) / 1000 },
-      }))
-    } catch (err) {
-      if (err.message !== 'Aborted') {
-        console.error('SeedVR2 upscale failed:', err)
-        setErrorMsg(err.message)
-      }
-    } finally {
-      clearInterval(tick)
-      if (abortRef.current === controller) abortRef.current = null
-      if (!controller.signal.aborted) setJob(null)
-    }
-  }
-
-  const cancelUpscale = () => {
-    abortRef.current?.abort()
-    abortRef.current = null
-    setJob(null)
-  }
+  const dimText = dims ? `${dims.width} × ${dims.height}` : '—'
 
   const OptButton = ({ active, onClick, children, disabled }) => (
     <button
@@ -538,7 +378,7 @@ function ExportView({ imageData, onBack }) {
   )
 
   const handleDownload = async () => {
-    const sourceUrl = previewUrl
+    const sourceUrl = resultUrl
     if (!sourceUrl) {
       console.warn('No image to download')
       return
@@ -546,8 +386,7 @@ function ExportView({ imageData, onBack }) {
 
     const ext = format.toLowerCase() === 'tiff' ? 'png' : format.toLowerCase()
     const base = imageData?.name?.replace(/\.[^/.]+$/, '') || 'portrait'
-    const suffix = isSeedVR2 ? target.replace('_', '-') : 'native'
-    const filename = `${base}_reallife_${suffix}.${ext}`
+    const filename = `${base}_reallife_2k.${ext}`
 
     try {
       const img = new Image()
@@ -558,7 +397,7 @@ function ExportView({ imageData, onBack }) {
         img.src = sourceUrl
       })
 
-      // Re-encode at 1:1 for the chosen format (resolution comes from the selected engine).
+      // Re-encode at 1:1 for the chosen format (resolution comes from the SeedVR2 pass).
       const canvas = document.createElement('canvas')
       canvas.width = img.naturalWidth
       canvas.height = img.naturalHeight
@@ -596,9 +435,9 @@ function ExportView({ imageData, onBack }) {
         <div>
           <div className="flex justify-between mb-2.5">
             <Mono className="text-[10px] text-secondary tracking-[0.14em]">FINAL RESULT</Mono>
-            {result && (
+            {imageData?.enhancedUrl && (
               <a
-                href={result.url}
+                href={imageData.enhancedUrl}
                 target="_blank"
                 rel="noreferrer"
                 className="font-mono text-[10px] tracking-[0.14em] text-secondary hover:text-ink transition-colors"
@@ -608,47 +447,12 @@ function ExportView({ imageData, onBack }) {
             )}
           </div>
           <div className="relative aspect-square bg-ink overflow-hidden">
-            {previewUrl && (
-              <img
-                src={previewUrl}
-                alt="result"
-                className={`w-full h-full object-cover transition-opacity ${needsRender || running ? 'opacity-45' : ''}`}
-              />
-            )}
-            {running && (
-              <div className="absolute inset-x-0 bottom-0 p-3.5 text-white font-mono">
-                <div className="flex justify-between mb-2 text-[10px] tracking-[0.14em]">
-                  <span className="flex items-center gap-2">
-                    <span className="w-1.5 h-1.5 bg-accent rounded-full animate-pulse" />
-                    SEEDVR2&nbsp;·&nbsp;{job.stage.toUpperCase()}
-                  </span>
-                  <span>{Math.round(job.progress)}%</span>
-                </div>
-                <div className="h-0.5 bg-white/25">
-                  <div className="h-full bg-white transition-all duration-100 ease-linear" style={{ width: `${job.progress}%` }} />
-                </div>
-              </div>
-            )}
-            {needsRender && !running && (
-              <div className="absolute inset-0 flex items-center justify-center">
-                <span className="font-mono text-[10px] tracking-[0.16em] text-white bg-ink/70 px-3 py-1.5">
-                  NOT&nbsp;RENDERED&nbsp;YET
-                </span>
-              </div>
+            {resultUrl && (
+              <img src={resultUrl} alt="result" className="w-full h-full object-cover" />
             )}
           </div>
         </div>
         <div>
-          <div className="mb-5">
-            <Mono className="text-[10px] text-secondary tracking-[0.14em] block mb-2.5">RESOLUTION</Mono>
-            <div className="flex gap-1.5 flex-wrap">
-              {Object.entries(EXPORT_TARGETS).map(([key, t]) => (
-                <OptButton key={key} active={target === key} disabled={running} onClick={() => setTarget(key)}>
-                  {t.label}
-                </OptButton>
-              ))}
-            </div>
-          </div>
           <div className="mb-5">
             <Mono className="text-[10px] text-secondary tracking-[0.14em] block mb-2.5">FORMAT</Mono>
             <div className="flex gap-1.5">
@@ -670,49 +474,25 @@ function ExportView({ imageData, onBack }) {
               <span className="text-secondary">DIMENSIONS</span>
               <span>{dimText}</span>
             </div>
-            <div className="flex justify-between mb-1">
+            <div className="flex justify-between">
               <span className="text-secondary">ENGINE</span>
-              <span>{spec.engine}</span>
+              <span>{ENGINE_LABEL}</span>
             </div>
-            {isSeedVR2 && (
-              <div className="flex justify-between">
-                <span className="text-secondary">RENDER TIME</span>
-                <span>
-                  {running && job.target === target
-                    ? `${job.elapsed.toFixed(1)}s`
-                    : result ? `${result.seconds.toFixed(1)}s` : '—'}
-                </span>
-              </div>
-            )}
           </div>
         </div>
       </div>
-      {errorMsg && (
-        <div className="px-5 pb-5">
-          <div className="border border-accent p-4 font-mono text-[11px] tracking-[0.06em] leading-6">
-            <div className="text-accent mb-2">SEEDVR2 UPSCALE FAILED</div>
-            <div className="text-secondary break-words">{errorMsg}</div>
-            <div className="text-secondary mt-3 text-[10px]">
-              Check: ComfyUI running at {import.meta.env.VITE_COMFY_URL || 'http://127.0.0.1:8188'} · CORS enabled · SeedVR2 nodes and models installed
-            </div>
-          </div>
-        </div>
-      )}
       <div className="border-t border-hairline px-5 py-4 flex justify-between items-center">
         <button
-          onClick={running ? cancelUpscale : onBack}
+          onClick={onBack}
           className="bg-transparent font-mono text-[10px] tracking-[0.14em] text-secondary hover:text-ink transition-colors"
         >
-          {running ? <>×&nbsp;&nbsp;CANCEL</> : <>←&nbsp;&nbsp;BACK</>}
+          ←&nbsp;&nbsp;BACK
         </button>
         <button
-          onClick={needsRender ? runUpscale : handleDownload}
-          disabled={running}
-          className="px-6 py-2.5 bg-ink text-white font-mono text-[10px] tracking-[0.18em] hover:opacity-85 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
+          onClick={handleDownload}
+          className="px-6 py-2.5 bg-ink text-white font-mono text-[10px] tracking-[0.18em] hover:opacity-85 transition-opacity"
         >
-          {running
-            ? <>UPSCALING&nbsp;&nbsp;{Math.round(job.progress)}%</>
-            : needsRender ? <>RUN&nbsp;SEEDVR2&nbsp;&nbsp;→</> : <>DOWNLOAD&nbsp;&nbsp;→</>}
+          DOWNLOAD&nbsp;&nbsp;→
         </button>
       </div>
     </div>
@@ -725,7 +505,6 @@ function ExportView({ imageData, onBack }) {
 export default function App() {
   const [step, setStep] = useState(1)
   const [imageData, setImageData] = useState(null)
-  const [preset, setPreset] = useState('natural')
 
   const reset = () => {
     if (imageData?.url) URL.revokeObjectURL(imageData.url)
@@ -744,7 +523,6 @@ export default function App() {
           {step === 2 && (
             <EnhanceView
               imageData={imageData}
-              preset={preset}
               onComplete={(enhancedUrl) => {
                 setImageData(prev => ({ ...prev, enhancedUrl }))
                 setStep(3)
@@ -755,15 +533,8 @@ export default function App() {
           {step === 3 && (
             <CompareView
               imageData={imageData}
-              preset={preset}
-              onPresetChange={setPreset}
               onExport={() => setStep(4)}
               onBack={reset}
-              onRerun={() => {
-                // Drop the previous enhancedUrl and go back to Enhance step with current preset
-                setImageData(prev => ({ ...prev, enhancedUrl: undefined }))
-                setStep(2)
-              }}
             />
           )}
           {step === 4 && (
